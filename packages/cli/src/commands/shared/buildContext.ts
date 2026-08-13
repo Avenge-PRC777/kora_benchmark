@@ -2,6 +2,7 @@ import {JudgeModel, Scenario, TestContext} from "@korabench/benchmark";
 import * as R from "remeda";
 import {createCustomModel} from "../../models/customModel.js";
 import {createGatewayModel} from "../../models/gatewayModel.js";
+import {isMaiThinkingSlug} from "../../models/maiThinkingModel.js";
 import {Model} from "../../models/model.js";
 import {isNativeRunnerSlug} from "../../models/nativeRunnerModel.js";
 import {isWebRunnerSlug} from "../../models/webRunnerModel.js";
@@ -65,7 +66,8 @@ export function resolveTargetGatewayModel(
   if (
     targetModelSlug.startsWith("custom-") ||
     isWebRunnerSlug(targetModelSlug) ||
-    isNativeRunnerSlug(targetModelSlug)
+    isNativeRunnerSlug(targetModelSlug) ||
+    isMaiThinkingSlug(targetModelSlug)
   ) {
     return undefined;
   }

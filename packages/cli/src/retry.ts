@@ -33,8 +33,30 @@ function isRetryableError(error: unknown): boolean {
     return false;
   }
 
-  const message = error.message.toLowerCase();
+  // Node's fetch() wraps the real DNS/connection failure (ENOTFOUND,
+  // ECONNREFUSED, etc.) in error.cause and only exposes a generic
+  // "fetch failed" at the top level — check both so these are retried
+  // instead of failing immediately with no retry at all.
+  const cause = (error as {cause?: unknown}).cause;
+  const causeMessage =
+    cause instanceof Error ? cause.message.toLowerCase() : "";
+  const causeCode =
+    cause && typeof cause === "object" && "code" in cause
+      ? String((cause as {code: unknown}).code).toLowerCase()
+      : "";
+
+  const message = error.message.toLowerCase() + " " + causeMessage;
   const name = error.name.toLowerCase();
+
+  // DNS resolution failures
+  if (
+    message.includes("enotfound") ||
+    message.includes("eai_again") ||
+    causeCode.includes("enotfound") ||
+    causeCode.includes("eai_again")
+  ) {
+    return true;
+  }
 
   // Rate limiting
   if (message.includes("429") || message.includes("rate limit")) {
@@ -63,6 +85,7 @@ function isRetryableError(error: unknown): boolean {
     message.includes("socket hang up") ||
     message.includes("network") ||
     message.includes("connection") ||
+    message.includes("fetch failed") ||
     name.includes("fetch") ||
     name.includes("network")
   ) {

@@ -14,7 +14,7 @@ Each test is a 3-turn conversation between a simulated child user and the target
 
 - **Node.js 25+**
 - **Yarn**
-- **AI Gateway API key** — set the `AI_GATEWAY_API_KEY` environment variable for the AI SDK gateway. Copy `.env.example` to `.env` and fill in your key.
+- **A model provider key** — set `AI_GATEWAY_API_KEY` for the AI SDK gateway, or `OPENROUTER_API_KEY` for OpenRouter (both accept the same `provider/model` slugs, e.g. `openai/gpt-4o`). If both are set, `AI_GATEWAY_API_KEY` takes precedence. Copy `.env.example` to `.env` and fill in your key.
 
 ## Getting started
 
@@ -130,6 +130,7 @@ yarn kora run <target-model> [user-model]
 | `--concurrency <n>`   | Max test tasks run in parallel (default: 10; use 1 for a single shared app account, e.g. `kora-app-*`)             |
 | `--reverse`           | Process scenarios in reverse file order (last scenario first); useful for order-effect comparisons                 |
 | `--cooldown <secs>`   | Seconds to sleep between sequential test tasks; pair with `--concurrency 1` to avoid app rate-limiting (default: 0) |
+| `--runfolder <name>`  | Run folder under `data/runs/` for results + resumable temp state (default: a freshly generated `<MCUHero>_<PST timestamp>` name each run, e.g. `IronMan_august11_5:40:23PM`); pass an explicit name to resume/retry that run — overridden by `-o/--output` if both are given |
 
 By default a single judge (`gpt-5.2:medium:limited`) grades every conversation, matching the production grading pipeline. When multiple judge models are specified, each judge independently evaluates every conversation: the final grade is the **median** across judges (on the ordered scale failing < adequate < exemplary), and the occurrence count is the **mean** (rounded). Per-judge results are stored in each test result for analysis.
 
@@ -254,7 +255,7 @@ Models are configured in a `models.json` file at the project root. The CLI searc
 | `temperature`     | No       | Sampling temperature                                                                                                                                        |
 | `providerOptions` | No       | Provider-specific options passed through to the AI SDK                                                                                                      |
 
-Authentication is handled via the `AI_GATEWAY_API_KEY` environment variable.
+Authentication is handled via the `AI_GATEWAY_API_KEY` environment variable, or `OPENROUTER_API_KEY` to route the same slugs through [OpenRouter](https://openrouter.ai) instead. If both are set, `AI_GATEWAY_API_KEY` takes precedence.
 
 ### Custom models
 
@@ -298,6 +299,20 @@ Then use the slug on the command line like any other model:
 ```bash
 yarn kora run custom-my-model
 ```
+
+### maithinking (internal reasoning-model target)
+
+The `maithinking` slug targets an internal inference-gateway deployment directly over its raw `/generate` HTTP API (not the AI SDK gateway), handled by `packages/cli/src/models/maiThinkingModel.ts`. Requires both `MAI_THINKING_URL` (the gateway's `/generate` endpoint) and `MAI_THINKING_DEPLOYMENT_NAME` (the `x-deployment-name` header value) — see `.env.example`.
+
+```bash
+yarn kora run maithinking
+```
+
+The model speaks ChatML (`<|im_start|>{role}\n{content}<|im_end|>\n`, generation primed with `<|im_start|>assistant\n`) and conditionally emits a reasoning trace before its real answer. When it does, the raw text (only visible with `skip_special_tokens: false`) looks like `type=thought<|im_end|>{reasoning}<|im_end|>{answer}`; when it answers directly, it's just `{answer}`. Without an explicit stop condition the model hallucinates additional fake turns indefinitely once its real answer is done, so requests set `stop: ["<|im_start|>"]` and the adapter strips the reasoning trace (when present) before returning the final answer as `getTextResponse`'s result. `maithinking` only supports `getTextResponse` (i.e. as a target model) — not `getStructuredResponse` (judge/user).
+
+On some prompts the reasoning trace runs long enough to exceed the token budget before reaching an answer; retries escalate `max_new_tokens` (capped below the model's 262144-token context window) instead of resending the identical request, which would fail identically.
+
+The hostname resolves once (cached) and connections use that IP directly with an explicit `Host` header — the local DNS resolver (Tailscale MagicDNS on a Tailscale-connected machine) was observed to intermittently fail concurrent lookups of the same internal hostname, which otherwise surfaces as spurious connection failures under kora's default `--concurrency 10`+.
 
 ## Running against real apps (web-runner / native-runner)
 

@@ -148,6 +148,17 @@ async function hasTempFiles(tempDir: string): Promise<boolean> {
   }
 }
 
+async function isCompletedRunResult(outputFilePath: string): Promise<boolean> {
+  try {
+    const content = await fs.readFile(outputFilePath, "utf-8");
+    if (content.trim().length === 0) return false;
+    JSON.parse(content);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export interface RunCommandOptions {
   riskIds?: readonly string[];
   limit?: number;
@@ -219,6 +230,20 @@ export async function runCommand(
 
   const outputDir = path.dirname(outputFilePath);
   const tempDir = path.join(outputDir, ".kora-run-tmp");
+
+  // A prior invocation against this same output path already completed
+  // (results file is present and parses, and no in-progress temp state is
+  // left behind) — treat re-running against it as a no-op rather than
+  // redoing the whole run from scratch.
+  if (
+    !(await hasTempFiles(tempDir)) &&
+    (await isCompletedRunResult(outputFilePath))
+  ) {
+    console.log(
+      `\n${outputFilePath} already contains a completed run for this folder — nothing to do.`
+    );
+    return;
+  }
 
   // Clear output file if no process in progress (no temp files)
   if (!(await hasTempFiles(tempDir))) {

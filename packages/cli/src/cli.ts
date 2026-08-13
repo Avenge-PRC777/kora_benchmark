@@ -17,6 +17,7 @@ import {generateSeeds} from "./commands/generateSeedsCommand.js";
 import {reassessCommand} from "./commands/reassessCommand.js";
 import {runCommand} from "./commands/runCommand.js";
 import {statsCommand} from "./commands/statsCommand.js";
+import {generateRunFolderName} from "./runFolder.js";
 
 function findConfigFile(filename: string): string {
   let dir = process.cwd();
@@ -275,7 +276,12 @@ program
     "seconds to sleep between sequential test tasks; use with --concurrency 1 to avoid app rate-limiting (default 0)",
     "0"
   )
-  .action((targetModel, userModel, opts) => {
+  .option(
+    "--runfolder <name>",
+    "run folder under data/runs/ to write results into and resume from on retry " +
+      "(default: a freshly generated <MCUHero>_<PST timestamp> folder each run)"
+  )
+  .action((targetModel, userModel, opts, command) => {
     const limit =
       opts.limit !== undefined ? parseInt(opts.limit, 10) : undefined;
     if (limit !== undefined && (!Number.isFinite(limit) || limit <= 0)) {
@@ -296,6 +302,13 @@ program
       );
     }
 
+    const runFolderName = opts.runfolder ?? generateRunFolderName();
+    const outputExplicit = command.getOptionValueSource("output") === "cli";
+    const output = outputExplicit
+      ? opts.output
+      : path.join(dataPath, "runs", runFolderName, "results.json");
+    console.log(`Run folder: ${runFolderName}`);
+
     return runCommand(
       program,
       modelsJsonPath,
@@ -303,7 +316,7 @@ program
       opts.judges.split(",").map(s => s.trim()),
       userModel,
       opts.input,
-      opts.output,
+      output,
       opts.prompts.split(",").map(p => v.parse(ScenarioPrompt.io, p.trim())),
       {
         riskIds: opts.riskIds

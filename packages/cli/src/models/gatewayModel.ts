@@ -1,11 +1,50 @@
+import {createOpenAICompatible} from "@ai-sdk/openai-compatible";
 import {ModelRequest, TypedModelRequest} from "@korabench/core";
 import {toJsonSchema} from "@valibot/to-json-schema";
-import {gateway, generateObject, generateText, jsonSchema} from "ai";
+import {
+  gateway,
+  generateObject,
+  generateText,
+  jsonSchema,
+  LanguageModel,
+} from "ai";
 import * as v from "valibot";
 import {createLogRetryHandler, RetryOptions, withRetry} from "../retry.js";
 import {createFallbackModel} from "./fallbackModel.js";
 import {Model} from "./model.js";
 import {resolveModelConfig} from "./modelConfig.js";
+
+// Model provider used to serve gateway-routed slugs. Both the AI SDK Gateway
+// and OpenRouter accept the same `provider/model` slug format (e.g.
+// `openai/gpt-4o`), so `models.json` entries work unchanged either way.
+// Precedence when both keys are set: AI_GATEWAY_API_KEY wins, since it's the
+// documented default; set only OPENROUTER_API_KEY to use OpenRouter instead.
+const openrouter = createOpenAICompatible({
+  name: "openrouter",
+  baseURL: "https://openrouter.ai/api/v1",
+  apiKey: process.env.OPENROUTER_API_KEY,
+});
+
+function resolveLanguageModel(modelId: string): LanguageModel {
+  if (process.env.AI_GATEWAY_API_KEY) return gateway(modelId);
+  if (process.env.OPENROUTER_API_KEY) return openrouter(modelId);
+  throw new Error(
+    "No model provider configured. Set AI_GATEWAY_API_KEY or OPENROUTER_API_KEY."
+  );
+}
+
+// OpenRouter's OpenAI-compatible endpoint requests `response_format:
+// json_object` for generateObject, which upstream OpenAI/Azure reject unless
+// the word "json" appears in the prompt — and even then, imposes constraints
+// generateObject doesn't account for. Route structured responses through the
+// text+extract fallback (below) for every model when running via OpenRouter,
+// not just Google/Anthropic.
+function usesTextExtractionFallback(modelId: string): boolean {
+  if (!process.env.AI_GATEWAY_API_KEY && process.env.OPENROUTER_API_KEY) {
+    return true;
+  }
+  return modelId.startsWith("google/") || modelId.startsWith("anthropic/");
+}
 
 export interface ModelOptions {
   retry?: RetryOptions;
@@ -76,7 +115,7 @@ export function createGatewayModel(
       const result = await withRetry(
         () =>
           generateText({
-            model: gateway(config.model),
+            model: resolveLanguageModel(config.model),
             system: request.messages.find(m => m.role === "system")?.content,
             messages: request.messages
               .filter(m => m.role !== "system")
@@ -111,10 +150,7 @@ export function createGatewayModel(
           content: m.content,
         }));
 
-      if (
-        config.model.startsWith("google/") ||
-        config.model.startsWith("anthropic/")
-      ) {
+      if (usesTextExtractionFallback(config.model)) {
         const schemaInstruction =
           "Respond with a single JSON object that strictly conforms to this JSON Schema. " +
           "Output JSON only — no prose, no code fences, no <think> tags.\n\n" +
@@ -125,7 +161,7 @@ export function createGatewayModel(
 
         return withRetry(async () => {
           const result = await generateText({
-            model: gateway(config.model),
+            model: resolveLanguageModel(config.model),
             system: combinedSystem,
             messages: userMessages,
             maxOutputTokens: maxTokens,
@@ -141,7 +177,7 @@ export function createGatewayModel(
 
       return withRetry(async () => {
         const result = await generateObject({
-          model: gateway(config.model),
+          model: resolveLanguageModel(config.model),
           system: systemMessage,
           messages: userMessages,
           schema: jsonSchema(outputSchema),

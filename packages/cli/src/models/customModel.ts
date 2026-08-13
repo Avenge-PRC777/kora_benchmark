@@ -1,4 +1,5 @@
 import {Scenario} from "@korabench/benchmark";
+import {createMaiThinkingModel, isMaiThinkingSlug} from "./maiThinkingModel.js";
 import {Model} from "./model.js";
 import {
   createNativeRunnerModel,
@@ -23,6 +24,19 @@ export async function createCustomModel(
     const webRunnerUrl = process.env.WEB_RUNNER_URL ?? DEFAULT_WEB_RUNNER_URL;
     const apiKey = process.env.WEB_RUNNER_API_KEY;
     return createWebRunnerModel({modelSlug, webRunnerUrl, apiKey});
+  }
+  if (isMaiThinkingSlug(modelSlug)) {
+    const url = process.env.MAI_THINKING_URL;
+    const deploymentName = process.env.MAI_THINKING_DEPLOYMENT_NAME;
+    if (!url || !deploymentName) {
+      throw new Error(
+        "MAI_THINKING_URL and MAI_THINKING_DEPLOYMENT_NAME must both be set to use the maithinking target model."
+      );
+    }
+    const maxTokens = process.env.MAI_THINKING_MAX_TOKENS
+      ? parseInt(process.env.MAI_THINKING_MAX_TOKENS, 10)
+      : undefined;
+    return createMaiThinkingModel({url, deploymentName, maxTokens});
   }
 
   return {
