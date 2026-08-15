@@ -170,7 +170,10 @@ def export_safety_cube_jsonl(
     user_models: dict[str, str] | None = None,
 ) -> int:
     """Export one Conversation record per test, per folder — the full
-    conversation (all turns) in a single record.
+    conversation (all turns) in a single record. Only tests whose key is
+    common to ALL loaded folders are included (same restriction as the SBS
+    tab), so every folder contributes the same set of scenarios and results
+    are directly comparable across folders.
 
     Record shape matches yolo's conversation.conversation.Conversation /
     conversation.message.Message schema directly (see
@@ -193,11 +196,14 @@ def export_safety_cube_jsonl(
     """
     target_models = target_models or {}
     user_models = user_models or {}
+    common_keys = set.intersection(*(set(t.keys()) for t in all_tests.values()))
     count = 0
     with output_path.open("w", encoding="utf-8") as f:
         for folder in folders:
             label = folder_label(folder)
             for key, data in all_tests[label].items():
+                if key not in common_keys:
+                    continue
                 messages = data.get("messages", [])
                 seed = data.get("scenario", {}).get("seed", {})
                 assessment = data.get("assessment", {})
