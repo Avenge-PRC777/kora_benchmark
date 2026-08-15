@@ -245,7 +245,7 @@ def export_safety_cube_jsonl(
                         for m in MECHANISMS
                     },
                 }
-                f.write(json.dumps(record) + "\n")
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
                 count += 1
     return count
 
