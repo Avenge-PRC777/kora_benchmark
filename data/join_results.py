@@ -169,12 +169,8 @@ def export_safety_cube_jsonl(
     target_models: dict[str, str] | None = None,
     user_models: dict[str, str] | None = None,
 ) -> int:
-    """Export one Conversation record per assistant turn, per test, per
-    folder — each record's message list is the transcript truncated through
-    that assistant turn (i.e. ...,U_k,B_k). This gives SafetyCube the right
-    preceding context to label U_k, and gives the grader the matching B_k to
-    score against that label's rubric — one (label, grade) pair per turn,
-    not just one for the whole conversation.
+    """Export one Conversation record per test, per folder — the full
+    conversation (all turns) in a single record.
 
     Record shape matches yolo's conversation.conversation.Conversation /
     conversation.message.Message schema directly (see
@@ -186,12 +182,9 @@ def export_safety_cube_jsonl(
     caller metadata alongside it), so kora's own scenario/grade metadata
     rides along without needing a second lookup file.
 
-    kora's own judge/mechanism assessment is computed once, over the FULL
-    conversation (see kora.ts's runJudges — called once at the end, not per
-    turn) — so it's only actually "about" the final turn. It's still
-    attached to every turn's record (kora_is_final_turn distinguishes which
-    one it was actually computed against) since it's cheap and useful
-    context for downstream analysis either way.
+    kora's own judge/mechanism assessment is computed once, over the full
+    conversation (see kora.ts's runJudges — called once at the end), so it
+    maps directly to this one record per test.
 
     target_models / user_models: optional {folder_label: model_name} maps —
     kora's own results.json would normally carry this, but is frequently
@@ -214,54 +207,40 @@ def export_safety_cube_jsonl(
                     for j in data.get("judgeAssessments", [])
                     if j.get("judgeModelSlug")
                 ]
-                last_assistant_turn_end = max(
-                    (i + 1 for i, m in enumerate(messages) if m.get("role") == "assistant"),
-                    default=None,
-                )
 
-                for turn_end in range(1, len(messages) + 1):
-                    # Only stop right after an assistant turn — that's the
-                    # candidate response being graded; stopping mid-turn
-                    # (on a user message) would leave nothing to grade.
-                    if messages[turn_end - 1].get("role") != "assistant":
-                        continue
-                    prefix = messages[:turn_end]
-                    conv_messages = [
-                        _make_message(m.get("role", "user"), m.get("content", ""))
-                        for m in prefix
-                    ]
-                    is_final_turn = turn_end == last_assistant_turn_end
-                    record = {
-                        "conversation": _make_conversation(conv_messages),
-                        "kora_folder": label,
-                        "kora_test_key": key,
-                        "kora_turn_index": turn_end // 2,  # 1-based assistant-turn number
-                        "kora_is_final_turn": is_final_turn,
-                        "kora_risk_category_id": seed.get("riskCategoryId"),
-                        "kora_risk_id": seed.get("riskId"),
-                        "kora_age_range": seed.get("ageRange"),
-                        "kora_prompt_variant": data.get("prompt"),
-                        "kora_target_model": target_models.get(label),
-                        "kora_user_model": user_models.get(label),
-                        "kora_judge_model_slugs": judge_slugs,
-                        "kora_overall_grade": assessment.get("grade"),
-                        "kora_overall_grade_reasons": assessment.get("reasons"),
-                        "kora_mechanism_assessment": {
-                            m: {
-                                "grade": mechanism_assessment.get(m, {}).get("grade"),
-                                "occurrenceCount": mechanism_assessment.get(m, {}).get(
-                                    "occurrenceCount"
-                                ),
-                                "notTriggered": mechanism_assessment.get(m, {}).get(
-                                    "notTriggered"
-                                ),
-                                "reasons": mechanism_assessment.get(m, {}).get("reasons"),
-                            }
-                            for m in MECHANISMS
-                        },
-                    }
-                    f.write(json.dumps(record) + "\n")
-                    count += 1
+                conv_messages = [
+                    _make_message(m.get("role", "user"), m.get("content", ""))
+                    for m in messages
+                ]
+                record = {
+                    "conversation": _make_conversation(conv_messages),
+                    "kora_folder": label,
+                    "kora_test_key": key,
+                    "kora_risk_category_id": seed.get("riskCategoryId"),
+                    "kora_risk_id": seed.get("riskId"),
+                    "kora_age_range": seed.get("ageRange"),
+                    "kora_prompt_variant": data.get("prompt"),
+                    "kora_target_model": target_models.get(label),
+                    "kora_user_model": user_models.get(label),
+                    "kora_judge_model_slugs": judge_slugs,
+                    "kora_overall_grade": assessment.get("grade"),
+                    "kora_overall_grade_reasons": assessment.get("reasons"),
+                    "kora_mechanism_assessment": {
+                        m: {
+                            "grade": mechanism_assessment.get(m, {}).get("grade"),
+                            "occurrenceCount": mechanism_assessment.get(m, {}).get(
+                                "occurrenceCount"
+                            ),
+                            "notTriggered": mechanism_assessment.get(m, {}).get(
+                                "notTriggered"
+                            ),
+                            "reasons": mechanism_assessment.get(m, {}).get("reasons"),
+                        }
+                        for m in MECHANISMS
+                    },
+                }
+                f.write(json.dumps(record) + "\n")
+                count += 1
     return count
 
 
@@ -839,9 +818,8 @@ def main() -> None:
         "--safety-cube-jsonl",
         default=None,
         help="Also export a SafetyCube-compatible JSONL (one Conversation record per "
-        "assistant turn, truncated through that turn) to this path — feed directly "
-        "to SafetyCube for per-turn prompt labelling, then grade the included "
-        "assistant turn against the resulting rubric. No conversion needed on the "
+        "test, containing the full multi-turn conversation) to this path — feed "
+        "directly to SafetyCube/Safety Grader. No conversion needed on the "
         "SafetyCube side: matches yolo's conversation.Conversation schema.",
     )
     parser.add_argument(
