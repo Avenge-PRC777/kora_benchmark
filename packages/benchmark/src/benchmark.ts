@@ -27,6 +27,10 @@ export interface JudgeModel {
   getResponse: <T>(
     request: TypedModelRequest<T>
   ) => Promise<TypedModelResponse<T>>;
+  /** Optional: the model that actually served the last call, when this judge
+   * is a fallback chain. Used to record the real grader instead of the chain
+   * label. */
+  resolvedLabel?: () => string | undefined;
 }
 
 export type TraceEvent =
@@ -42,6 +46,10 @@ export interface TestContext {
   judgeModels: Record<string, JudgeModel>;
   /** Optional observability hook. No-op when undefined. */
   trace?: (event: TraceEvent) => void;
+  /** When true, the target model is called with a bare
+   * user/assistant/user/... transcript — no system message is prepended.
+   * Used to measure a model's out-of-the-box behavior with no scaffolding. */
+  omitSystemPrompt?: boolean;
 }
 
 export interface GenerationEvent<T> {

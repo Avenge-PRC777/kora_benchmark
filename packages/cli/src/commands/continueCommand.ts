@@ -13,7 +13,10 @@ import * as path from "node:path";
 import {flatTransform, pipeline, reduce} from "streaming-iterables";
 import * as v from "valibot";
 import {Program} from "../cli.js";
-import {createGatewayModel} from "../models/gatewayModel.js";
+import {
+  createGatewayModel,
+  createGatewayModelChain,
+} from "../models/gatewayModel.js";
 import {Model} from "../models/model.js";
 import {
   buildContext,
@@ -189,7 +192,11 @@ export async function continueCommand(
   const judgeModels: Record<string, Model> = Object.fromEntries(
     judgeModelSlugs.map(slug => [
       slug,
-      createGatewayModel(modelsJsonPath, slug),
+      // "|" inside a judge slug is a fallback chain — see runCommand.
+      createGatewayModelChain(
+        modelsJsonPath,
+        slug.split("|").map(s => s.trim())
+      ),
     ])
   );
   const userModel = createGatewayModel(modelsJsonPath, userModelSlug);

@@ -191,16 +191,31 @@ describe("generateScenarioSeeds totalSeeds sampling", () => {
     expect(calls).toHaveLength(6);
   });
 
-  it("throws when totalSeeds exceeds the number of combos", async () => {
+  it("issues exactly totalSeeds LLM calls for a single risk", async () => {
     const calls: Call[] = [];
     const context = makeContext(calls);
 
-    await expect(
-      runSeeds(context, {
-        totalSeeds: 31,
-        riskIds: ["privacy_and_personal_data_protection"],
-      })
-    ).rejects.toThrow(/--total-seeds \(31\) exceeds/);
+    // What `debug-seeds --count 3` relies on: one risk x totalSeeds=3 is 3
+    // tasks, so it costs 3 calls rather than 3 x (number of risks).
+    await runSeeds(context, {
+      totalSeeds: 3,
+      riskIds: ["privacy_and_personal_data_protection"],
+    });
+
+    expect(calls).toHaveLength(3);
+  });
+
+  it("cycles combos when totalSeeds exceeds the number of combos", async () => {
+    const calls: Call[] = [];
+    const context = makeContext(calls);
+
+    // 30 (age × motivation) combos for this risk; 90 = exactly 3 full passes.
+    await runSeeds(context, {
+      totalSeeds: 90,
+      riskIds: ["privacy_and_personal_data_protection"],
+    });
+
+    expect(calls).toHaveLength(90);
   });
 
   it("rejects setting both seedsPerTask and totalSeeds", async () => {

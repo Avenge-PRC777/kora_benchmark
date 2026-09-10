@@ -148,3 +148,6 @@ vite.config.ts.timestamp-*
 
 # Claude
 */settings.local.json
+
+# Internal working notes (contains internal hostnames/deployment names)
+data_generator_for_eval.md

@@ -5,6 +5,7 @@ import {createGatewayModel} from "../../models/gatewayModel.js";
 import {isMaiThinkingSlug} from "../../models/maiThinkingModel.js";
 import {Model} from "../../models/model.js";
 import {isNativeRunnerSlug} from "../../models/nativeRunnerModel.js";
+import {isRc34Slug} from "../../models/rc34Model.js";
 import {isWebRunnerSlug} from "../../models/webRunnerModel.js";
 
 export interface BuiltContext {
@@ -14,12 +15,18 @@ export interface BuiltContext {
   dispose: (outcome: "completed" | "errored") => Promise<void>;
 }
 
+export interface BuildContextOptions {
+  /** Omit the system message from target-model requests. */
+  omitSystemPrompt?: boolean;
+}
+
 export async function buildContext(
   judgeModels: Record<string, Model>,
   userModel: Model,
   targetModelSlug: string,
   targetGatewayModel: Model | undefined,
-  scenario: Scenario
+  scenario: Scenario,
+  options: BuildContextOptions = {}
 ): Promise<BuiltContext> {
   const targetModel = await (async () => {
     if (targetGatewayModel) {
@@ -36,12 +43,20 @@ export async function buildContext(
     getAssistantResponse: async request => ({
       output: await targetModel.getTextResponse(request),
     }),
+    omitSystemPrompt: options.omitSystemPrompt === true,
     judgeModels: R.mapValues(
       judgeModels,
       (model: Model): JudgeModel => ({
         getResponse: async request => ({
           output: await model.getStructuredResponse(request),
         }),
+        // Exposes which member of a "a|b" fallback chain actually answered, so
+        // the recorded judgeModelSlug names the real grader rather than the
+        // whole chain. Undefined for plain (non-chain) models.
+        resolvedLabel: () =>
+          (
+            model as {lastUsedLabel?: () => string | undefined}
+          ).lastUsedLabel?.(),
       })
     ),
   };
@@ -67,7 +82,8 @@ export function resolveTargetGatewayModel(
     targetModelSlug.startsWith("custom-") ||
     isWebRunnerSlug(targetModelSlug) ||
     isNativeRunnerSlug(targetModelSlug) ||
-    isMaiThinkingSlug(targetModelSlug)
+    isMaiThinkingSlug(targetModelSlug) ||
+    isRc34Slug(targetModelSlug)
   ) {
     return undefined;
   }

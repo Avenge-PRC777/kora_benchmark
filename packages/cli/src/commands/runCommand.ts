@@ -8,7 +8,10 @@ import * as readline from "node:readline";
 import {flatTransform, pipeline, reduce} from "streaming-iterables";
 import * as v from "valibot";
 import {Program} from "../cli.js";
-import {createGatewayModel} from "../models/gatewayModel.js";
+import {
+  createGatewayModel,
+  createGatewayModelChain,
+} from "../models/gatewayModel.js";
 import {Model} from "../models/model.js";
 import {
   buildContext,
@@ -52,18 +55,26 @@ export async function* readScenariosFromJsonl(
   filePath: string,
   filters?: ScenarioFilters
 ): AsyncGenerator<Scenario> {
+  // Closed in a finally: callers abandon this generator early (--limit, or
+  // countTestTasks returning at the cap), so the loop may never run to
+  // completion. Node 25 makes an unclosed FileHandle collected by GC a fatal
+  // ERR_INVALID_STATE, which crashed mid-run rather than leaking quietly.
   const fh = await fs.open(filePath);
-  const rl = readline.createInterface({input: fh.createReadStream()});
-  for await (const line of rl) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) {
-      continue;
+  try {
+    const rl = readline.createInterface({input: fh.createReadStream()});
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) {
+        continue;
+      }
+      const scenario = v.parse(Scenario.io, JSON.parse(trimmed));
+      if (filters?.riskIds && !filters.riskIds.has(scenario.seed.riskId)) {
+        continue;
+      }
+      yield scenario;
     }
-    const scenario = v.parse(Scenario.io, JSON.parse(trimmed));
-    if (filters?.riskIds && !filters.riskIds.has(scenario.seed.riskId)) {
-      continue;
-    }
-    yield scenario;
+  } finally {
+    await fh.close();
   }
 }
 
@@ -172,6 +183,9 @@ export interface RunCommandOptions {
    * (skipped before the first task and for graceful-restart cache hits).
    * Pair with concurrency=1 to space out calls to a rate-limited app. */
   cooldownMs?: number;
+  /** Call the target model with a bare user/assistant transcript — no system
+   * message. Measures out-of-the-box behavior with no safety scaffolding. */
+  omitSystemPrompt?: boolean;
 }
 
 export async function runCommand(
@@ -214,12 +228,28 @@ export async function runCommand(
   if (cooldownMs > 0) {
     console.log(`Cooldown between sequential tasks: ${cooldownMs / 1000}s.`);
   }
+  if (options.omitSystemPrompt) {
+    console.log(
+      "No system prompt: target model receives a bare user/assistant transcript."
+    );
+  }
   let freshStarted = 0;
 
+  // Each judge entry may itself be a "|"-separated fallback chain, e.g.
+  //   --judges 'gpt-5.2:medium:limited|deepseek-v3.2'
+  // gpt-5.2 REFUSES to grade some conversations outright (observed on the
+  // sexual-content and hate-speech risks, where it returns prose instead of
+  // JSON). A refusal is deterministic, so without a fallback the whole test
+  // dies — and those deaths cluster in exactly the risks whose grades matter
+  // most, silently biasing the results. "," still separates distinct judges
+  // for median scoring; "|" is the within-judge fallback.
   const judgeModels: Record<string, Model> = Object.fromEntries(
     judgeModelSlugs.map(slug => [
       slug,
-      createGatewayModel(modelsJsonPath, slug),
+      createGatewayModelChain(
+        modelsJsonPath,
+        slug.split("|").map(s => s.trim())
+      ),
     ])
   );
   const userModel = createGatewayModel(modelsJsonPath, userModelSlug);
@@ -303,7 +333,8 @@ export async function runCommand(
           userModel,
           targetModelSlug,
           targetGatewayModel,
-          task.scenario
+          task.scenario,
+          {omitSystemPrompt: options.omitSystemPrompt === true}
         );
 
         let outcome: "completed" | "errored" = "errored";

@@ -16,12 +16,15 @@ export function isMaiThinkingSlug(slug: string): boolean {
   return slug === MAI_THINKING_SLUG;
 }
 
-interface MaiThinkingModelConfig {
+export interface MaiThinkingModelConfig {
   url: string;
   deploymentName: string;
   maxTokens?: number;
   temperature?: number;
   retry?: RetryOptions;
+  /** Label used in retry/error messages. Defaults to the maithinking slug;
+   * rc34 reuses this transport and overrides it so logs name the right slug. */
+  label?: string;
 }
 
 // ChatML turn: <|im_start|>{role}\n{content}<|im_end|>\n
@@ -29,10 +32,10 @@ function renderTurn(role: string, content: string): string {
   return `<|im_start|>${role}\n${content}<|im_end|>\n`;
 }
 
-function renderPrompt(messages: ModelRequest["messages"]): string {
-  const rendered = messages
-    .map(m => renderTurn(m.role, m.content))
-    .join("");
+/** Render messages as a ChatML prompt primed for an assistant turn. Exported
+ * so debug commands can print the exact string the gateway receives. */
+export function renderChatMlPrompt(messages: ModelRequest["messages"]): string {
+  const rendered = messages.map(m => renderTurn(m.role, m.content)).join("");
   return `${rendered}<|im_start|>assistant\n`;
 }
 
@@ -87,18 +90,48 @@ function resolveEndpointOnce(url: string): Promise<ResolvedEndpoint> {
 // prefix is fragile — it was observed to sometimes emit a garbled header
 // (e.g. "=thought" instead of "type=thought"), which fell through to the
 // "direct answer" branch and leaked the entire reasoning trace into the
-// conversation as if it were the real answer. Match "=thought" appearing
-// within the first ~10 characters instead — tolerant of the "type" prefix
-// being garbled or dropped, while still requiring the "=thought" marker
-// itself so a genuine answer that happens to start with the word "thought"
-// (e.g. "I thought about this...") isn't misidentified as a reasoning header.
-const THOUGHT_HEADER_PATTERN = /^.{0,10}=thought/i;
+// conversation as if it were the real answer. Match "=thought" near the start
+// instead — tolerant of the "type" prefix being garbled, dropped, or preceded
+// by a special token, while still requiring the "=thought" marker itself so a
+// genuine answer that happens to start with the word "thought" (e.g. "I
+// thought about this...") isn't misidentified as a reasoning header.
+//
+// The window is 40 characters rather than ~10 because rc34 (same serving
+// stack, different checkpoint) prefixes the header with a special token:
+// "<|im_sep|>type=thought" is 22 characters, and at the old width it fell
+// through to the direct-answer branch and leaked the whole trace.
+const THOUGHT_HEADER_PATTERN = /^.{0,40}?=thought/i;
 
-function extractFinalAnswer(rawText: string): string {
+// rc34 sometimes finishes its answer and immediately begins ANOTHER thought
+// block, which the stop token then truncates — leaving e.g.
+// "...right here with you.<|im_sep|>type=thought" as the final segment. Without
+// stripping it, that marker was returned as part of the answer and reached both
+// the judge and the recorded transcript verbatim. Anchored to the END and
+// requires the special-token form or the bare header, so an answer that merely
+// ends in the word "thought" is untouched.
+const TRAILING_THOUGHT_HEADER =
+  /(?:<\|im_[a-z]+\|>\s*)+(?:[a-z]{0,6}=thought)?\s*$|^\s*(?:[a-z]{0,6}=thought)\s*$/i;
+
+function stripTrailingThoughtHeader(text: string): string {
+  return text.replace(TRAILING_THOUGHT_HEADER, "").trim();
+}
+
+export function extractFinalAnswer(rawText: string): string {
   const parts = rawText.split("<|im_end|>");
   const hasThoughtHeader = THOUGHT_HEADER_PATTERN.test(parts[0]!);
 
   if (!hasThoughtHeader) {
+    // rc34 was observed to sometimes emit a reasoning trace with NO header at
+    // all: two segments where the first is the trace and the second the
+    // answer. Treating that as a direct answer leaks the whole trace into the
+    // conversation. A genuine direct answer has ONE segment (plus any
+    // hallucinated turns past the stop marker, which are discarded), so a
+    // headerless two-segment response is a reasoning trace: take the last
+    // segment as the answer.
+    if (parts.length === 2 && parts[1]!.trim().length > 0) {
+      return parts[1]!.trim();
+    }
+
     // No reasoning header: a direct answer, optionally followed by a
     // trailing stop-marker delimiter (or hallucinated extra turns beyond
     // it, which are discarded).
@@ -112,14 +145,27 @@ function extractFinalAnswer(rawText: string): string {
     // so parts[0] is NOT a usable answer. Surface this as retryable rather
     // than returning the partial reasoning dump.
     throw new Error(
-      `maithinking response ended before completing its reasoning (got ${parts.length} of 3 expected segments); ` +
+      `Reasoning-model response ended before completing its reasoning (got ${parts.length} of 3 expected segments); ` +
         `increase maxTokens. Raw: ${rawText.slice(0, 200)}`
     );
   }
 
-  // Completed reasoning trace: everything after the second delimiter is
-  // the real answer.
-  return parts.slice(2).join("<|im_end|>").trim();
+  // Completed reasoning trace. The canonical shape is exactly three segments
+  // (header / reasoning / answer), but rc34 was observed to emit a doubled
+  // delimiter after the header, giving four segments with an empty second one:
+  //   ["type=thought", "", "<reasoning>", "<answer>"]
+  // Slicing from a fixed index then returns reasoning+answer joined, leaking
+  // the trace. The answer is always the LAST non-empty segment, so take that.
+  const lastNonEmpty = parts
+    .map(part => stripTrailingThoughtHeader(part.trim()))
+    .filter(part => part.length > 0)
+    .at(-1);
+  if (lastNonEmpty === undefined) {
+    throw new Error(
+      `Reasoning-model response contained no answer segment. Raw: ${rawText.slice(0, 200)}`
+    );
+  }
+  return lastNonEmpty;
 }
 
 export function createMaiThinkingModel(config: MaiThinkingModelConfig): Model {
@@ -129,7 +175,7 @@ export function createMaiThinkingModel(config: MaiThinkingModelConfig): Model {
     maxDelayMs: 60000,
     backoffMultiplier: 2,
     jitterFactor: 0.2,
-    onRetry: createLogRetryHandler(MAI_THINKING_SLUG),
+    onRetry: createLogRetryHandler(config.label ?? MAI_THINKING_SLUG),
     ...config.retry,
   };
 
@@ -137,7 +183,7 @@ export function createMaiThinkingModel(config: MaiThinkingModelConfig): Model {
     request: ModelRequest,
     maxNewTokens: number
   ): Promise<string> {
-    const text = renderPrompt(request.messages);
+    const text = renderChatMlPrompt(request.messages);
     const temperature = request.temperature ?? config.temperature;
     const {url, hostHeader} = await resolveEndpointOnce(config.url);
 
@@ -170,7 +216,7 @@ export function createMaiThinkingModel(config: MaiThinkingModelConfig): Model {
 
     if (!r.ok) {
       throw new Error(
-        `maithinking POST ${config.url} failed: ${r.status} ${await r.text()}`
+        `${config.label ?? MAI_THINKING_SLUG} POST ${config.url} failed: ${r.status} ${await r.text()}`
       );
     }
 

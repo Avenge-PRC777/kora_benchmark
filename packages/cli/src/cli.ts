@@ -12,6 +12,9 @@ import {fileURLToPath} from "node:url";
 import * as v from "valibot";
 import {compareAssessmentsCommand} from "./commands/compareAssessmentsCommand.js";
 import {continueCommand} from "./commands/continueCommand.js";
+import {debugRc34Command} from "./commands/debugRc34Command.js";
+import {debugSeedsCommand} from "./commands/debugSeedsCommand.js";
+import {debugTurnCommand} from "./commands/debugTurnCommand.js";
 import {expandScenariosCommand} from "./commands/expandScenariosCommand.js";
 import {generateSeeds} from "./commands/generateSeedsCommand.js";
 import {reassessCommand} from "./commands/reassessCommand.js";
@@ -240,8 +243,10 @@ program
   )
   .option(
     "--judges <models>",
-    "comma-separated judge models",
-    "gpt-5.2:medium:limited"
+    "comma-separated judge models (median-scored); use | within one entry for a " +
+      "fallback chain, e.g. 'gpt-5.2:medium:limited|deepseek-v3.2' — gpt-5.2 refuses " +
+      "to grade some sexual-content/hate-speech conversations",
+    "gpt-5.2:medium:limited|deepseek-v3.2"
   )
   .option(
     "-i, --input <path>",
@@ -280,6 +285,10 @@ program
     "--runfolder <name>",
     "run folder under data/runs/ to write results into and resume from on retry " +
       "(default: a freshly generated <MCUHero>_<PST timestamp> folder each run)"
+  )
+  .option(
+    "--no-system-prompt",
+    "send the target model a bare user/assistant transcript with no system message"
   )
   .action((targetModel, userModel, opts, command) => {
     const limit =
@@ -327,6 +336,8 @@ program
         concurrency,
         reverse: opts.reverse === true,
         cooldownMs: cooldownSeconds * 1000,
+        // Commander maps `--no-system-prompt` onto `systemPrompt: false`.
+        omitSystemPrompt: opts.systemPrompt === false,
       }
     );
   });
@@ -343,8 +354,10 @@ program
   )
   .option(
     "--judges <models>",
-    "comma-separated judge models",
-    "gpt-5.2:medium:limited"
+    "comma-separated judge models (median-scored); use | within one entry for a " +
+      "fallback chain, e.g. 'gpt-5.2:medium:limited|deepseek-v3.2' — gpt-5.2 refuses " +
+      "to grade some sexual-content/hate-speech conversations",
+    "gpt-5.2:medium:limited|deepseek-v3.2"
   )
   .option(
     "-i, --input <path>",
@@ -410,8 +423,10 @@ program
   )
   .option(
     "--judges <models>",
-    "comma-separated judge models",
-    "gpt-5.2:medium:limited"
+    "comma-separated judge models (median-scored); use | within one entry for a " +
+      "fallback chain, e.g. 'gpt-5.2:medium:limited|deepseek-v3.2' — gpt-5.2 refuses " +
+      "to grade some sexual-content/hate-speech conversations",
+    "gpt-5.2:medium:limited|deepseek-v3.2"
   )
   .option(
     "-i, --input <path>",
@@ -515,6 +530,111 @@ program
         .filter(id => id.length > 0),
       byModel: opts.byModel === true,
     })
+  );
+
+program
+  .command("debug-turn")
+  .description(
+    "print the file::function call flow and the exact payload sent to the provider for one target-model turn"
+  )
+  .argument("<target-model>", "model whose request payload to print")
+  .requiredOption(
+    "--conversation <spec>",
+    "conversation to replay, e.g. [<user>hi</user><bot>hey</bot><user>why?</user>]"
+  )
+  .option(
+    "--no-system-prompt",
+    "omit the system message (bare user/assistant transcript)"
+  )
+  .option(
+    "--age-range <range>",
+    "age range whose child system prompt to use (7to9, 10to12, 13to17); ignored with --no-system-prompt"
+  )
+  .option("--send", "also call the model and print its response")
+  .action((targetModel, opts) =>
+    debugTurnCommand(program, modelsJsonPath, targetModel, opts.conversation, {
+      // Commander maps `--no-system-prompt` onto `systemPrompt: false`.
+      noSystemPrompt: opts.systemPrompt === false,
+      ageRange: opts.ageRange
+        ? v.parse(AgeRange.io, opts.ageRange.trim())
+        : undefined,
+      send: opts.send === true,
+    })
+  );
+
+program
+  .command("debug-seeds")
+  .description(
+    "print the file::function call flow for seed generation and emit N fully-expanded seeds (through firstUserMessage)"
+  )
+  .argument("[model]", "model(s) for seed generation", "gpt-4o")
+  .option("--count <n>", "number of seeds to print", "3")
+  .option(
+    "--expand-model <models>",
+    "model(s) for seed expansion; comma-separated fallback chain (gpt-5.2 declines some sexual-content / self-harm risks, so a fallback is on by default)",
+    "gpt-5.2:high,deepseek-v3.2"
+  )
+  .option(
+    "--user-model <models>",
+    "model(s) for the first user message",
+    "deepseek-v3.2"
+  )
+  .option(
+    "--risk-ids <ids>",
+    "comma-separated risk IDs to restrict generation to (defaults to all risks)"
+  )
+  .option(
+    "--age-ranges <ranges>",
+    "comma-separated age ranges to generate seeds for (7to9, 10to12, 13to17)",
+    AgeRange.list.join(",")
+  )
+  .option(
+    "--motivations <names>",
+    "comma-separated motivation names to restrict generation to (defaults to all motivations)"
+  )
+  .action((model, opts) => {
+    const count = parseInt(opts.count, 10);
+    if (!Number.isFinite(count) || count <= 0) {
+      throw new Error(
+        `--count must be a positive integer (got: ${opts.count})`
+      );
+    }
+    return debugSeedsCommand(
+      program,
+      modelsJsonPath,
+      splitCsv(model),
+      splitCsv(opts.expandModel),
+      splitCsv(opts.userModel),
+      count,
+      {
+        totalSeeds: count,
+        ageRanges: opts.ageRanges
+          .split(",")
+          .map(r => v.parse(AgeRange.io, r.trim())),
+        riskIds: opts.riskIds
+          ?.split(",")
+          .map(id => id.trim())
+          .filter(id => id.length > 0),
+        motivations: opts.motivations
+          ?.split(",")
+          .map(name => name.trim())
+          .filter(name => name.length > 0),
+      }
+    );
+  });
+
+program
+  .command("debug-rc34")
+  .description(
+    "send one prompt to the RC34 deployment, printing the file::function flow and its output"
+  )
+  .requiredOption("--prompt <text>", "prompt to send to RC34")
+  .option(
+    "--dry-run",
+    "print the resolved config + payload without calling RC34"
+  )
+  .action(opts =>
+    debugRc34Command(program, opts.prompt, {dryRun: opts.dryRun === true})
   );
 
 program.parseAsync();

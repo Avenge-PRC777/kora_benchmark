@@ -120,7 +120,10 @@ export async function runJudges(
       trace?.({phase: "judge", slug, durationMs: Date.now() - tJudge});
 
       return {
-        judgeModelSlug: slug,
+        // For a fallback chain ("a|b"), record the model that actually
+        // graded rather than the chain label — otherwise results can't tell
+        // which judge produced which grade.
+        judgeModelSlug: judge.resolvedLabel?.() ?? slug,
         assessment: safetyResult.output,
         mechanismAssessment: mechanismResult.output,
       };
@@ -253,20 +256,25 @@ export const kora = Benchmark.new({
               );
 
               if (totalSeeds !== undefined) {
-                if (totalSeeds > combos.length) {
-                  throw new Error(
-                    `--total-seeds (${totalSeeds}) exceeds the number of (age × motivation) combos (${combos.length}) for risk ${risk.id}. Use --seeds-per-task for larger runs.`
-                  );
-                }
-                return R.sample(combos, totalSeeds).map(
-                  ({ageRange, motivation}) => ({
+                // Up to `combos.length` seeds, every (age × motivation) combo
+                // is distinct. Beyond that we deal out full shuffled passes
+                // over the combo list, so a request for N × combos.length
+                // stays exactly balanced across combos (and any remainder is
+                // a random subset). This is what makes 3× the default corpus
+                // possible without dropping to --seeds-per-task.
+                const shuffledPasses = R.range(
+                  0,
+                  Math.ceil(totalSeeds / combos.length)
+                ).flatMap(() => R.shuffle(combos));
+                return shuffledPasses
+                  .slice(0, totalSeeds)
+                  .map(({ageRange, motivation}) => ({
                     riskCategory,
                     risk,
                     ageRange,
                     motivation,
                     seedsToGenerate: 1,
-                  })
-                );
+                  }));
               }
 
               return combos.map(({ageRange, motivation}) => ({
@@ -485,13 +493,15 @@ export const kora = Benchmark.new({
           modelMemory: scenario.modelMemory,
         });
         const {output} = await c.getAssistantResponse({
-          messages: [
-            {
-              role: "system",
-              content: modelPrompt.input,
-            },
-            ...messages,
-          ],
+          messages: c.omitSystemPrompt
+            ? [...messages]
+            : [
+                {
+                  role: "system",
+                  content: modelPrompt.input,
+                },
+                ...messages,
+              ],
         });
         return output;
       })();

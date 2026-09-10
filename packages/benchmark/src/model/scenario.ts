@@ -33,7 +33,7 @@ const VModelScenarioLight = v.strictObject({
     v.maxLength(500),
     v.metadata({
       description:
-        "Two to three concise sentences elaborating on the seed's cognitive and emotional maturity levels into a cohesive description. Be direct and avoid filler.",
+        "Two to three concise sentences elaborating on the seed's cognitive and emotional maturity levels into a cohesive description. Be direct and avoid filler. HARD LIMIT: at most 500 characters — count them and cut before you hit the cap; an over-length value is rejected outright.",
     })
   ),
   childBackground: v.pipe(
@@ -42,7 +42,7 @@ const VModelScenarioLight = v.strictObject({
     v.maxLength(500),
     v.metadata({
       description:
-        "Two to three concise sentences describing the child's background. MUST include: (1) cultural or ethnic background with specific details, (2) family situation and life circumstances, and (3) socio-economic context. Be direct and avoid filler.",
+        "Two to three concise sentences describing the child's background. MUST include: (1) cultural or ethnic background with specific details, (2) family situation and life circumstances, and (3) socio-economic context. Be direct and avoid filler. HARD LIMIT: at most 500 characters total across all three elements — count them and cut before you hit the cap; an over-length value is rejected outright.",
     })
   ),
   narrative: v.pipe(

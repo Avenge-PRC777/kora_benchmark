@@ -29,3 +29,4 @@ export * from "./model/testAssessment.js";
 export * from "./model/testResult.js";
 export * from "./prompts/conversationToAssessmentPrompt.js";
 export * from "./prompts/conversationToMechanismAssessmentPrompt.js";
+export * from "./prompts/conversationToNextMessagePrompt.js";

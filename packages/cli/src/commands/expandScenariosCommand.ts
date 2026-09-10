@@ -21,14 +21,20 @@ async function* readSeedsFromJsonl(
   filePath: string,
   riskIdFilter?: ReadonlySet<string>
 ): AsyncGenerator<ScenarioSeed> {
+  // See readScenariosFromJsonl: an abandoned generator must still close its
+  // FileHandle, or Node 25 aborts the process when the GC reclaims it.
   const fh = await fs.open(filePath);
-  const rl = readline.createInterface({input: fh.createReadStream()});
-  for await (const line of rl) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0) continue;
-    const seed = v.parse(ScenarioSeed.io, JSON.parse(trimmed));
-    if (riskIdFilter && !riskIdFilter.has(seed.riskId)) continue;
-    yield seed;
+  try {
+    const rl = readline.createInterface({input: fh.createReadStream()});
+    for await (const line of rl) {
+      const trimmed = line.trim();
+      if (trimmed.length === 0) continue;
+      const seed = v.parse(ScenarioSeed.io, JSON.parse(trimmed));
+      if (riskIdFilter && !riskIdFilter.has(seed.riskId)) continue;
+      yield seed;
+    }
+  } finally {
+    await fh.close();
   }
 }
 
@@ -116,7 +122,6 @@ export async function expandScenariosCommand(
           // Not yet processed.
         }
 
-        let lastError: unknown;
         for (let i = 0; i < expansionModels.length; i++) {
           const {label, model} = expansionModels[i]!;
           const context: ExpandScenarioContext = {
@@ -134,7 +139,6 @@ export async function expandScenariosCommand(
             progress.increment(true);
             return [];
           } catch (error) {
-            lastError = error;
             const next = expansionModels[i + 1];
             const reason =
               error instanceof ScenarioValidationError
@@ -148,20 +152,27 @@ export async function expandScenariosCommand(
               continue;
             }
 
-            // Last model exhausted.
-            if (error instanceof ScenarioValidationError) {
-              console.error(
-                `\nValidation failed for seed ${seed.id} (all models exhausted): ${error.lastReasons}`
-              );
-              failureCount++;
-              progress.increment(false);
-              return [];
-            }
-            throw error;
+            // Last model exhausted. Record the seed as failed and keep going
+            // rather than aborting the whole run: at 2000+ seeds a single
+            // unrecoverable seed (e.g. a response truncated mid-JSON on every
+            // model) would otherwise discard hours of completed work. Temp
+            // files are kept, so re-running retries only the failures.
+            const detail =
+              error instanceof ScenarioValidationError
+                ? `Validation failed: ${error.lastReasons}`
+                : `Error: ${error instanceof Error ? error.message : String(error)}`;
+            console.error(
+              `\nSeed ${seed.id} failed (all models exhausted). ${detail}`
+            );
+            failureCount++;
+            progress.increment(false);
+            return [];
           }
         }
 
-        throw lastError;
+        // Unreachable: the loop either returns a result or records a failure
+        // for every model in the chain, and the chain is non-empty.
+        return [];
       },
       readSeedsFromJsonl(seedsFilePath, riskIdFilter)
     )

@@ -59,7 +59,20 @@ yarn kora generate-seeds [model]
 | `--distribution <preset-or-path>` | Pin persona demographics (age band, gender, SES, race/ethnicity) to a target population. Preset name (e.g. `us-census-2020`) or path to a JSON distribution file. Requires `--total-seeds`. |
 | `--random-seed <int>`      | RNG seed for reproducible demographic allocation (distribution mode only)             |
 
-Use `--total-seeds` for small, focused runs where you want an exact scenario count per risk (e.g. `--total-seeds 24 --risk-ids privacy_and_personal_data_protection`). It randomly samples `count` distinct (age × motivation) combinations and generates one seed for each; it errors if `count` exceeds the number of combos available for a risk.
+Use `--total-seeds` to fix an exact scenario count per risk (e.g. `--total-seeds 24 --risk-ids privacy_and_personal_data_protection`). It randomly samples `count` (age × motivation) combinations and generates one seed for each.
+
+`--total-seeds` may exceed the number of combos available for a risk. Up to `combos` seeds each combination is distinct; beyond that the generator deals out additional shuffled passes over the combo list, so an exact multiple of the combo count stays perfectly balanced across combos and any remainder is a random subset. This is how you scale the corpus: the shipped `data/scenarioSeeds.jsonl` is 781 seeds, and
+
+```bash
+yarn kora generate-seeds gpt-4o --total-seeds 90 -o data/scenarioSeeds.3x.jsonl
+```
+
+triples it (most risks have 30 age × motivation combos, so `--total-seeds 90` is 3 balanced passes per risk). Then expand and run against the new file:
+
+```bash
+yarn kora expand-scenarios -i data/scenarioSeeds.3x.jsonl -o data/scenarios.3x.jsonl
+yarn kora run gpt-4o -i data/scenarios.3x.jsonl
+```
 
 #### Population-distribution mode
 
@@ -90,6 +103,8 @@ yarn kora generate-seeds gpt-4o,gpt-4o:extended,gpt-5.5:low,gemini-2.5-flash:lim
 yarn kora expand-scenarios "gpt-5.2:high,gpt-5.5:medium,claude-sonnet-4.6:limited" \
   "deepseek-v3.2,gpt-4o:extended,gemini-2.5-flash:limited"
 ```
+
+Model **refusals** fail over immediately. `gpt-5.2` declines some seeds on the sexual-content and self-harm risks, returning prose (`I'm sorry, but I cannot assist with that request.`) instead of JSON. That surfaces as a JSON parse error, which would otherwise look transient and burn all five backoff retries (~35s) re-sending an identical request that is refused identically each time. `isRefusalError` in `packages/cli/src/retry.ts` recognizes the refusal — using the model's raw output, which the throw site attaches to the error since `JSON.parse` quotes only ~10 characters of it — and marks it non-retryable, so the fallback chain advances to the next model at once. Keep a non-OpenAI model (e.g. `deepseek-v3.2`) in the chain for those risks.
 
 For `expand-scenarios`, the primary `[model]` chain advances on **both** thrown errors *and* `ScenarioValidationError` (when the model returns valid JSON but the content fails the validator — typically truncation). The `[user-model]` chain only advances on thrown errors, since first-message generation is plain text with no structural validator.
 
@@ -130,6 +145,7 @@ yarn kora run <target-model> [user-model]
 | `--concurrency <n>`   | Max test tasks run in parallel (default: 10; use 1 for a single shared app account, e.g. `kora-app-*`)             |
 | `--reverse`           | Process scenarios in reverse file order (last scenario first); useful for order-effect comparisons                 |
 | `--cooldown <secs>`   | Seconds to sleep between sequential test tasks; pair with `--concurrency 1` to avoid app rate-limiting (default: 0) |
+| `--no-system-prompt`  | Send the target model a bare `user` / `assistant` / `user` … transcript with no system message — measures out-of-the-box behavior with no safety scaffolding. Only the target model is affected; the user-simulation and judge models keep their own prompts |
 | `--runfolder <name>`  | Run folder under `data/runs/` for results + resumable temp state (default: a freshly generated `<MCUHero>_<PST timestamp>` name each run, e.g. `IronMan_august11_5:40:23PM`); pass an explicit name to resume/retry that run — overridden by `-o/--output` if both are given |
 
 By default a single judge (`gpt-5.2:medium:limited`) grades every conversation, matching the production grading pipeline. When multiple judge models are specified, each judge independently evaluates every conversation: the final grade is the **median** across judges (on the ordered scale failing < adequate < exemplary), and the occurrence count is the **mean** (rounded). Per-judge results are stored in each test result for analysis.
@@ -224,6 +240,112 @@ yarn kora stats [options]
 
 Output columns: `n` (records scored), `%fail` / `%adeq` / `%exem` (grade distribution), `occ μ` (mean occurrenceCount), and a `signal` flag (`ok` or `NO SIGNAL (<grade> <pct>%)`).
 
+### `debug-turn`
+
+Prints the `filename::functionName` call flow for a single target-model turn, then the exact payload that gets handed to the provider (OpenRouter or the AI gateway). Dry-run by default — no request is sent unless you pass `--send`. Use it to verify what a target model actually receives, especially with `--no-system-prompt`.
+
+```bash
+yarn kora debug-turn <target-model> --conversation <spec> [options]
+```
+
+| Argument / Option        | Description                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| `<target-model>`         | Model whose request payload to print                                                                                           |
+| `--conversation <spec>`  | Required. Conversation to replay, e.g. `[<user>hi</user><bot>bot reply here</bot><user>user question here</user>]`. Tags: `<user>`/`<child>` → user, `<bot>`/`<assistant>`/`<model>` → assistant. Brackets optional; must end on a `<user>` turn |
+| `--no-system-prompt`     | Omit the system message (bare user/assistant transcript)                                                                       |
+| `--age-range <range>`    | Age range whose child system prompt to use (`7to9`, `10to12`, `13to17`); ignored with `--no-system-prompt`. Default: the age-less `default` prompt |
+| `--send`                 | Also call the model and print its response                                                                                     |
+
+Print the exact payload OpenRouter receives with no system instruction:
+
+```bash
+# no system message — just <user>/<assistant>/<user>
+yarn kora debug-turn gpt-4o \
+  --conversation '[<user>hi</user><bot>bot reply here</bot><user>user question here</user>]' \
+  --no-system-prompt
+```
+
+```
+[trace] debugTurnCommand.ts::debugTurnCommand target=gpt-4o
+[trace] debugTurnCommand.ts::parseConversationSpec
+[trace] debugTurnCommand.ts::parseConversationSpec → 3 message(s)
+[trace] debugTurnCommand.ts::buildTargetMessages
+[trace]   debugTurnCommand.ts::buildTargetMessages --no-system-prompt → system omitted
+[trace] debugTurnCommand.ts::describePayload
+[trace]   gatewayModel.ts::describeGatewayTextPayload
+[trace]   modelConfig.ts::resolveModelConfig gpt-4o
+
+===== payload sent to provider for target model =====
+{
+  "provider": "openrouter",
+  "endpoint": "https://openrouter.ai/api/v1/chat/completions",
+  "slug": "gpt-4o",
+  "model": "openai/gpt-4o",
+  "messages": [
+    {"role": "user", "content": "hi"},
+    {"role": "assistant", "content": "bot reply here"},
+    {"role": "user", "content": "user question here"}
+  ],
+  "maxOutputTokens": 4000
+}
+===== end payload sent to provider for target model =====
+```
+
+Pass `rc34` as the target to print the payload that the RC34 deployment receives instead (endpoint, routing headers, and chat-completions body):
+
+```bash
+yarn kora debug-turn rc34 \
+  --conversation '[<user>hi</user><bot>bot reply here</bot><user>user question here</user>]' \
+  --no-system-prompt
+```
+
+Variants:
+
+```bash
+# same, but with the system prompt kora normally injects (age-less default variant)
+yarn kora debug-turn gpt-4o --conversation '[<user>hi</user><bot>ok</bot><user>why?</user>]'
+
+# with the age-aware child system prompt for 10–12 year olds
+yarn kora debug-turn gpt-4o --conversation '[<user>hi</user>]' --age-range 10to12
+
+# print the payload AND actually call the model, printing its reply
+yarn kora:env debug-turn gpt-4o --conversation '[<user>hi</user>]' --no-system-prompt --send
+```
+
+### `debug-seeds`
+
+Prints the `filename::functionName` call flow for seed generation + expansion, then emits N seeds fully expanded through their `firstUserMessage` — i.e. everything the run stage needs before the first target-model call. Use it to eyeball what a new seed set looks like before generating thousands.
+
+```bash
+yarn kora debug-seeds [model] [options]
+```
+
+| Argument / Option         | Description                                                     |
+| ------------------------- | ----------------------------------------------------------------- |
+| `[model]`                 | Model(s) for seed generation (default: `gpt-4o`)                 |
+| `--count <n>`             | Number of seeds to print (default: `3`)                          |
+| `--expand-model <models>` | Model(s) for seed expansion, comma-separated fallback chain (default: `gpt-5.2:high,deepseek-v3.2`) |
+| `--user-model <models>`   | Model(s) for the first user message (default: `deepseek-v3.2`)   |
+| `--risk-ids <ids>`        | Comma-separated risk IDs to restrict generation to               |
+| `--age-ranges <ranges>`   | Comma-separated age ranges (default: all)                        |
+| `--motivations <names>`   | Comma-separated motivation names (default: all)                  |
+
+```bash
+# print 3 fully-expanded seeds (through firstUserMessage) plus the call flow
+yarn kora:env debug-seeds --count 3
+
+# widen to specific risks
+yarn kora:env debug-seeds --count 3 --risk-ids privacy_and_personal_data_protection
+```
+
+`--count` is passed through as `--total-seeds`, which is **per risk**. With no `--risk-ids` the command therefore pins a single risk, so `--count 3` costs 3 LLM calls rather than `3 × 25` tasks (of which ~10 would be in flight before the 3rd seed arrives). It prints which risk it picked; pass `--risk-ids` to widen.
+
+The default `--expand-model` is a fallback chain because `gpt-5.2` refuses some sexual-content and self-harm seeds — see [Fallback chains](#fallback-chains).
+
+Each seed prints as a JSON block containing the seed itself (risk, age range, motivation, persona demographics), the expanded scenario fields (`shortTitle`, `childMaturity`, `childBackground`, `narrative`, `evaluationCriteria`, `modelMemory`), and `firstUserMessage`.
+
+Both `debug-*` commands hit real models, so use `yarn kora:env` (or export your key) — `debug-turn` without `--send` is the exception and needs no key.
+
 ## Model configuration
 
 ### Model registry (`models.json`)
@@ -313,6 +435,88 @@ The model speaks ChatML (`<|im_start|>{role}\n{content}<|im_end|>\n`, generation
 On some prompts the reasoning trace runs long enough to exceed the token budget before reaching an answer; retries escalate `max_new_tokens` (capped below the model's 262144-token context window) instead of resending the identical request, which would fail identically.
 
 The hostname resolves once (cached) and connections use that IP directly with an explicit `Host` header — the local DNS resolver (Tailscale MagicDNS on a Tailscale-connected machine) was observed to intermittently fail concurrent lookups of the same internal hostname, which otherwise surfaces as spurious connection failures under kora's default `--concurrency 10`+.
+
+### rc34 (internal reasoning-model deployment target)
+
+The `rc34` slug targets an internal deployment over its inference gateway's raw `/generate` API in ChatML, handled by `packages/cli/src/models/rc34Model.ts`. It is the same serving stack as [`maithinking`](#maithinking-internal-reasoning-model-target) on a different checkpoint, so it reuses that adapter's transport (ChatML rendering, reasoning-trace stripping, DNS caching, token escalation).
+
+```bash
+yarn kora:env run rc34
+```
+
+Gateway hostnames and deployment names are environment-specific and are **not** baked into the source. Configure them in `.env`:
+
+| Env                     | Required | Purpose |
+| ----------------------- | -------- | ------- |
+| `RC34_BASE_URL`         | yes\*    | Gateway base URL (no path); `/generate` is appended |
+| `RC34_CLUSTER_GATEWAYS` | no       | JSON object of cluster name -> gateway base URL, used with `RC34_CLUSTER` instead of `RC34_BASE_URL` |
+| `RC34_CLUSTER`          | no       | Cluster to look up in `RC34_CLUSTER_GATEWAYS` |
+| `RC34_DEPLOYMENT_NAME`  | yes      | `x-deployment-name` routing header — one specific deployment |
+| `RC34_MAX_TOKENS`       | no       | Output token budget (default `16000`); retries escalate from there |
+
+\* either `RC34_BASE_URL`, or `RC34_CLUSTER` plus `RC34_CLUSTER_GATEWAYS`.
+
+**It does not speak `/v1/chat/completions`.** The checkpoint has no `tokenizer.chat_template`, so that endpoint returns `400 Cannot use chat template functions because tokenizer.chat_template is not set`. Prompts must be pre-rendered as ChatML and posted to `/generate`.
+
+**Route by deployment, not by group.** A launcher typically prints an in-cluster command using a `*.svc.cluster.local` address with an `x-deployment-group-name` header. That hostname resolves only from inside the cluster (`ENOTFOUND` elsewhere), and group routing is not supported from outside it (`503`). From a laptop, use the cluster's externally reachable gateway with `x-deployment-name` naming one deployment.
+
+Deployments are retired and relaunched over time, so a name that worked before will eventually stop serving (`503`). Check which deployments are ready and set `RC34_DEPLOYMENT_NAME` accordingly:
+
+```bash
+curl -sS "$RC34_BASE_URL/v1/models" -H "x-deployment-name: $RC34_DEPLOYMENT_NAME"
+```
+
+Like `maithinking`, `rc34` conditionally emits a reasoning trace (`type=thought<|im_end|>{reasoning}<|im_end|>{answer}`) which the adapter strips before returning the answer, and it supports `getTextResponse` only — target model, not judge or user.
+
+### `debug-rc34`
+
+Sends one prompt to the RC34 deployment and prints its output, tracing the `filename::functionName` flow (config resolution → routing headers → model-id discovery → chat-completions call).
+
+```bash
+yarn kora debug-rc34 --prompt <text> [--dry-run]
+```
+
+| Option           | Description                                                        |
+| ---------------- | ------------------------------------------------------------------ |
+| `--prompt <text>`| Required. Prompt to send to RC34                                   |
+| `--dry-run`      | Print the resolved endpoint, headers, and body without calling RC34 |
+
+```bash
+# prints the call flow + RC34's answer (needs network access to the gateway)
+yarn kora:env debug-rc34 --prompt 'Hi there'
+
+# resolved endpoint/headers/body only — no network access needed
+yarn kora debug-rc34 --prompt 'Hi there' --dry-run
+```
+
+```
+[trace] debugRc34Command.ts::debugRc34Command prompt="Hi there"
+[trace] debugRc34Command.ts::resolveRc34Config
+[trace]   customModel.ts::resolveRc34Config
+
+===== RC34 request =====
+{
+  "endpoint": "$RC34_BASE_URL/generate",
+  "headers": {
+    "content-type": "application/json",
+    "x-deployment-name": "$RC34_DEPLOYMENT_NAME"
+  },
+  "body": {
+    "text": "<|im_start|>user\nHi there<|im_end|>\n<|im_start|>assistant\n",
+    "sampling_params": {
+      "max_new_tokens": 16000,
+      "stop": ["<|im_start|>"],
+      "skip_special_tokens": false
+    }
+  }
+}
+===== end RC34 request =====
+
+===== RC34 output =====
+Hi there! How can I help you today?
+```
+
+`debug-turn` also accepts `rc34` as its target, printing the RC34 payload instead of the gateway one — see [`debug-turn`](#debug-turn).
 
 ## Running against real apps (web-runner / native-runner)
 
@@ -603,9 +807,11 @@ packages/
   cli/src/                           CLI package
     commands/                        CLI command implementations
     __tests__/                       CLI test suites
+    debugTrace.ts                    file::function call tracing for the debug-* commands
     models/                          Model-related modules
       model.ts                       Model interface definition
       gatewayModel.ts                AI SDK gateway model implementation
+      rc34Model.ts                   RC34 internal-deployment target (OpenAI-compatible)
       modelConfig.ts                 Model registry loader
       customModel.ts                 Custom model hook (edit to add your own)
     retry.ts                         Retry with exponential backoff
